@@ -1646,6 +1646,11 @@ static void set_bridge_play_status(esp_avrc_playback_stat_t status)
              audio_mode_name(audio_mode));
 }
 
+static esp_avrc_playback_stat_t bridge_car_playback_status(esp_avrc_playback_stat_t status)
+{
+    return status == ESP_AVRC_PLAYBACK_STOPPED ? ESP_AVRC_PLAYBACK_PAUSED : status;
+}
+
 static void bt_app_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
     switch (event) {
@@ -3472,8 +3477,10 @@ static void handle_bridge_rx(const char *payload)
         unsigned int pos = 0;
         int status = ESP_AVRC_PLAYBACK_STOPPED;
         if (sscanf(payload + 13, "len=%u pos=%u status=%d", &len, &pos, &status) == 3) {
+            esp_avrc_playback_stat_t car_status =
+                bridge_car_playback_status((esp_avrc_playback_stat_t)status);
             bool pos_changed = bridge_media_pos_ms != pos;
-            bool status_changed = avrc_play_status != (esp_avrc_playback_stat_t)status;
+            bool status_changed = avrc_play_status != car_status;
             if (bridge_media_len_ms == len && !pos_changed && !status_changed) {
                 return;
             }
@@ -3484,7 +3491,7 @@ static void handle_bridge_rx(const char *payload)
                 notify_avrc_play_pos_changed();
             }
             if (status_changed) {
-                set_bridge_play_status((esp_avrc_playback_stat_t)status);
+                set_bridge_play_status(car_status);
             }
         }
     } else if (strncmp(payload, "AVRCP_POS:", 10) == 0) {
@@ -3496,9 +3503,11 @@ static void handle_bridge_rx(const char *payload)
         }
     } else if (strncmp(payload, "AVRCP_NOTIFY_PLAYBACK:", 22) == 0) {
         int status = atoi(payload + 22);
-        if (avrc_play_status != (esp_avrc_playback_stat_t)status) {
+        esp_avrc_playback_stat_t car_status =
+            bridge_car_playback_status((esp_avrc_playback_stat_t)status);
+        if (avrc_play_status != car_status) {
             ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
-            set_bridge_play_status((esp_avrc_playback_stat_t)status);
+            set_bridge_play_status(car_status);
         }
     } else if (strncmp(payload, "AVRCP_METADATA:", 15) == 0) {
         unsigned int attr = 0;
