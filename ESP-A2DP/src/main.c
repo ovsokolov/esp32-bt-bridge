@@ -75,7 +75,7 @@ static const char *TAG = "ESP_A2DP";
 #define BT_DEVICE_NAME "ESP-A2DP-Source"
 #endif
 
-#define AG_BUILD_TAG "ag-avrcp-metadata-refresh-20260526"
+#define AG_BUILD_TAG "ag-hfp-outband-ring-repeat-20260526"
 
 #ifndef BT_REMOTE_NAME
 #define BT_REMOTE_NAME ""
@@ -106,6 +106,7 @@ static const char *TAG = "ESP_A2DP";
 #define HFP_CALL_CONTROL_TIMEOUT_MS 1000
 #define HFP_CHLD2_DEFER_MS 300
 #define HFP_POST_HANGUP_SUPPRESS_MS 8000
+#define HFP_OUTBAND_RING_REPEAT_MS 2000
 #define BRIDGE_SNAPSHOT_MIN_INTERVAL_MS 1500
 #define A2DP_I2S_GATE_DURING_SCO 0
 
@@ -289,6 +290,8 @@ static audio_mode_t hfp_media_resume_mode = AUDIO_STOPPED;
 static esp_avrc_playback_stat_t hfp_media_resume_status = ESP_AVRC_PLAYBACK_STOPPED;
 static bool hfp_media_resume_in_progress;
 static bool hfp_ag_audio_connected;
+static volatile bool hfp_outband_ring_task_running;
+static uint32_t hfp_outband_ring_ticks;
 static bool sco_pcm_gpio_active;
 static bool a2dp_i2s_enabled;
 static uint8_t rgb_pixel[3];
@@ -2474,6 +2477,79 @@ static void hfp_ag_set_inband_ring(bool provided)
     ESP_LOGI(TAG, "HFP_AG_BSIR:%s", provided ? "provided" : "not_provided");
 }
 
+static bool hfp_should_outband_ring(void)
+{
+    return hfp_ag_connected && have_remote_bda && hfp_has_mode(CALL_INCOMING);
+}
+
+static esp_err_t hfp_ag_send_outband_ring_state(const char *reason)
+{
+    if (!hfp_should_outband_ring()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    hfp_ag_set_inband_ring(false);
+    esp_err_t err = esp_hf_ag_answer_call(remote_bda,
+                                          hfp_report_num_active(),
+                                          hfp_report_num_held(),
+                                          hfp_call_status(),
+                                          hfp_call_setup_status(),
+                                          hfp_report_number(),
+                                          ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+    hfp_report_indicators();
+    hfp_outband_ring_ticks++;
+    ESP_LOGI(TAG,
+             "HFP_AG_OUTBAND_RING:%s tick=%" PRIu32 " err=0x%x active=%d held=%d setup=%d num=\"%s\"",
+             reason ? reason : "tick", hfp_outband_ring_ticks, err,
+             hfp_report_num_active(), hfp_report_num_held(),
+             hfp_call_setup_status(), hfp_report_number() ? hfp_report_number() : "");
+    return err;
+}
+
+static void hfp_outband_ring_task(void *arg)
+{
+    const char *reason = (const char *)arg;
+    ESP_LOGI(TAG, "HFP_AG_OUTBAND_RING_TASK:start reason=%s", reason ? reason : "unknown");
+
+    while (hfp_should_outband_ring()) {
+        hfp_ag_send_outband_ring_state(reason);
+        vTaskDelay(pdMS_TO_TICKS(HFP_OUTBAND_RING_REPEAT_MS));
+        reason = "repeat";
+    }
+
+    hfp_outband_ring_task_running = false;
+    ESP_LOGI(TAG, "HFP_AG_OUTBAND_RING_TASK:stop");
+    vTaskDelete(NULL);
+}
+
+static void hfp_start_outband_ring(const char *reason)
+{
+    if (!hfp_should_outband_ring()) {
+        return;
+    }
+    if (hfp_outband_ring_task_running) {
+        hfp_ag_send_outband_ring_state(reason);
+        return;
+    }
+
+    hfp_outband_ring_task_running = true;
+    BaseType_t ok = xTaskCreate(hfp_outband_ring_task, "hfp_ring", 3072,
+                                (void *)reason, 6, NULL);
+    if (ok != pdPASS) {
+        hfp_outband_ring_task_running = false;
+        ESP_LOGW(TAG, "HFP_AG_OUTBAND_RING_TASK:create_failed");
+        hfp_ag_send_outband_ring_state(reason);
+    }
+}
+
+static void hfp_stop_outband_ring(const char *reason)
+{
+    if (hfp_outband_ring_task_running) {
+        ESP_LOGI(TAG, "HFP_AG_OUTBAND_RING_TASK:stop_requested reason=%s",
+                 reason ? reason : "unknown");
+    }
+}
+
 static void hfp_sync_phone_state(void)
 {
     if (!hfp_ag_connected || !have_remote_bda) {
@@ -2489,10 +2565,8 @@ static void hfp_sync_phone_state(void)
 
     if (!hfp_has_established_call()) {
         if (hfp_has_mode(CALL_INCOMING)) {
-            hfp_ag_set_inband_ring(false);
-            esp_hf_ag_answer_call(remote_bda, hfp_report_num_active(), hfp_report_num_held(),
-                                  hfp_call_status(), hfp_call_setup_status(),
-                                  hfp_report_number(), ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+            hfp_ag_send_outband_ring_state("SYNC_INCOMING");
+            hfp_start_outband_ring("SYNC_INCOMING");
             return;
         }
         hfp_report_indicators();
@@ -2523,6 +2597,7 @@ static void hfp_simulate_incoming_call(const char *number)
                           hfp_call_status(), hfp_call_setup_status(),
                           call->number, ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
     hfp_report_indicators();
+    hfp_start_outband_ring("INCOMING");
     hfp_log_call_state("INCOMING");
 }
 
@@ -2729,6 +2804,7 @@ static void hfp_answer_call(void)
         }
     }
     call->mode = CALL_ACTIVE;
+    hfp_stop_outband_ring("ANSWER");
 
     ESP_LOGI(TAG, "HFP_AG_ANSWER_AUDIO_STATE:connected=%d sco_gpio=%d",
              hfp_ag_audio_connected, sco_pcm_gpio_active);
@@ -2750,6 +2826,7 @@ static void hfp_end_call(const char *source)
     if (suppress_phone_echo || keep_phone_echo_suppressed) {
         hfp_suppress_phone_sync(HFP_POST_HANGUP_SUPPRESS_MS);
     }
+    hfp_stop_outband_ring(source);
     hfp_sync_phone_state();
     hfp_report_indicators();
     hfp_log_call_state(source);
@@ -2768,6 +2845,7 @@ static void hfp_reject_call(void)
     char rejected_number[sizeof(call->number)];
     snprintf(rejected_number, sizeof(rejected_number), "%s", call->number);
     hfp_clear_call(call);
+    hfp_stop_outband_ring("REJECT");
     esp_hf_ag_reject_call(remote_bda, hfp_report_num_active(), hfp_report_num_held(),
                           hfp_call_status(), hfp_call_setup_status(),
                           rejected_number, ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
@@ -3386,6 +3464,9 @@ static void handle_bridge_rx(const char *payload)
     } else if (strncmp(payload, "CALL_IN:", 8) == 0) {
         ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
         hfp_simulate_incoming_call(payload + 8);
+    } else if (strcmp(payload, "HFP_HF_RING") == 0) {
+        ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
+        hfp_start_outband_ring("PHONE_RING");
     } else if (strcmp(payload, "CALL_END") == 0) {
         ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
         hfp_end_call("BRIDGE_END");

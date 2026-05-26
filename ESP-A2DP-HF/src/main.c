@@ -89,7 +89,7 @@ static const char *TAG = "ESP_A2DP_HF";
 #define AVRCP_SNAPSHOT_MIN_INTERVAL_MS 1500
 #define AVRCP_TRACK_CHANGE_SNAPSHOT_DELAY_MS 700
 #define PCM_RINGBUF_SIZE (24 * 1024)
-#define HF_BUILD_TAG "hf-avrcp-auto-track-refresh-20260526"
+#define HF_BUILD_TAG "hf-hfp-forward-ring-20260526"
 #define A2DP_I2S_GATE_DURING_SCO 0
 
 static esp_bd_addr_t remote_bda;
@@ -1564,6 +1564,7 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
         break;
     case ESP_HF_CLIENT_RING_IND_EVT:
         ESP_LOGI(TAG, "HFP_HF_RING");
+        ESP_LOGI(TAG, "BRIDGE_TX:HFP_HF_RING");
         schedule_hf_clcc_query();
         break;
     case ESP_HF_CLIENT_VOLUME_CONTROL_EVT:
