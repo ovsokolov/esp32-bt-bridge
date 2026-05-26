@@ -313,6 +313,9 @@ static bool hfp_media_resume_in_progress;
 static bool hfp_ag_audio_connected;
 static volatile bool hfp_outband_ring_task_running;
 static uint32_t hfp_outband_ring_ticks;
+static uint32_t hfp_peer_features;
+static uint32_t hfp_peer_chld_features;
+static bool hfp_ring_inband_preferred;
 static bool sco_pcm_gpio_active;
 static bool a2dp_i2s_enabled;
 static uint8_t rgb_pixel[3];
@@ -704,6 +707,12 @@ static void bridge_request_snapshot(const char *reason)
 
     bridge_snapshot_not_before = now + pdMS_TO_TICKS(BRIDGE_SNAPSHOT_MIN_INTERVAL_MS);
     ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_SNAPSHOT");
+}
+
+static void bridge_force_snapshot(const char *reason)
+{
+    bridge_snapshot_not_before = 0;
+    bridge_request_snapshot(reason);
 }
 
 static void __attribute__((unused)) select_simulated_track(uint32_t track, bool start_playback)
@@ -1952,6 +1961,8 @@ static void bt_app_avrc_tg_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param
             avrc_rn_play_status_registered = false;
             avrc_rn_track_registered = false;
             avrc_rn_play_pos_registered = false;
+        } else {
+            bridge_force_snapshot("avrcp_connect");
         }
         ESP_LOGI(TAG, "AVRCP_TG_CONNECTION:connected=%d bda=%s",
                  param->conn_stat.connected, bda_str);
@@ -2498,6 +2509,22 @@ static void hfp_ag_set_inband_ring(bool provided)
     ESP_LOGI(TAG, "HFP_AG_BSIR:%s", provided ? "provided" : "not_provided");
 }
 
+static const char *hfp_ring_mode_name(void)
+{
+    return hfp_ring_inband_preferred ? "inband" : "outband";
+}
+
+static void hfp_set_ring_mode(bool inband, const char *reason)
+{
+    if (hfp_ring_inband_preferred == inband) {
+        return;
+    }
+    hfp_ring_inband_preferred = inband;
+    ESP_LOGI(TAG, "HFP_AG_RING_MODE:%s reason=%s peer=0x%" PRIx32 " chld=0x%" PRIx32,
+             hfp_ring_mode_name(), reason ? reason : "unknown",
+             hfp_peer_features, hfp_peer_chld_features);
+}
+
 static bool hfp_should_outband_ring(void)
 {
     return hfp_ag_connected && have_remote_bda && hfp_has_mode(CALL_INCOMING);
@@ -2510,7 +2537,7 @@ static esp_err_t hfp_ag_send_outband_ring_state(const char *reason)
     }
 
     char *number = hfp_report_number();
-    hfp_ag_set_inband_ring(true);
+    hfp_ag_set_inband_ring(hfp_ring_inband_preferred);
     esp_err_t err = esp_hf_ag_answer_call(remote_bda,
                                           hfp_report_num_active(),
                                           hfp_report_num_held(),
@@ -2527,8 +2554,9 @@ static esp_err_t hfp_ag_send_outband_ring_state(const char *reason)
     hfp_report_indicators();
     hfp_outband_ring_ticks++;
     ESP_LOGI(TAG,
-             "HFP_AG_INBAND_RING:%s tick=%" PRIu32 " err=0x%x sco=1 active=%d held=%d setup=%d num=\"%s\"",
-             reason ? reason : "tick", hfp_outband_ring_ticks, err,
+             "HFP_AG_RING:%s mode=%s tick=%" PRIu32 " err=0x%x sco=%d active=%d held=%d setup=%d num=\"%s\"",
+             reason ? reason : "tick", hfp_ring_mode_name(),
+             hfp_outband_ring_ticks, err, hfp_ring_inband_preferred ? 1 : 0,
              hfp_report_num_active(), hfp_report_num_held(),
              hfp_call_setup_status(), number ? number : "");
     return err;
@@ -3167,11 +3195,24 @@ static void bt_app_hf_ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             have_remote_bda = true;
             bt_paired = true;
             hfp_ag_connected = true;
+            hfp_peer_features = param->conn_stat.peer_feat;
+            hfp_peer_chld_features = param->conn_stat.chld_feat;
+            hfp_ring_inband_preferred = false;
+            if (hfp_peer_features == 0x17f && hfp_peer_chld_features == 0xb474) {
+                hfp_set_ring_mode(true, "peer_signature");
+            }
+            ESP_LOGI(TAG, "HFP_AG_PEER_FEATURES:peer=0x%" PRIx32
+                     " chld=0x%" PRIx32 " ring=%s",
+                     hfp_peer_features, hfp_peer_chld_features,
+                     hfp_ring_mode_name());
             save_last_bda(remote_bda);
             hfp_ag_set_inband_ring(false);
         } else if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_DISCONNECTED) {
             hfp_ag_connected = false;
             hfp_ag_audio_connected = false;
+            hfp_peer_features = 0;
+            hfp_peer_chld_features = 0;
+            hfp_ring_inband_preferred = false;
             hfp_reset_calls();
             hfp_update_media_policy("HFP_DISCONNECTED");
         }
@@ -3287,6 +3328,9 @@ static void bt_app_hf_ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             memcpy(remote_bda, param->unat_rep.remote_addr, ESP_BD_ADDR_LEN);
             have_remote_bda = true;
             hfp_handle_chld(param->unat_rep.unat + 6);
+        } else if (param->unat_rep.unat != NULL &&
+                   strncmp(param->unat_rep.unat, "+XAPL=SUNPLUS-", 13) == 0) {
+            hfp_set_ring_mode(true, "xapl_sunplus");
         }
         esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
         break;

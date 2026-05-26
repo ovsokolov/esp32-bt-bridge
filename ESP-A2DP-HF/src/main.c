@@ -574,6 +574,15 @@ static bool avrcp_metadata_is_duplicate(uint8_t attr_id, const uint8_t *text, ui
     return false;
 }
 
+static void avrcp_clear_snapshot_cache(const char *reason)
+{
+    avrcp_have_last_status = false;
+    avrcp_have_last_track_id = false;
+    memset(avrcp_have_last_metadata, 0, sizeof(avrcp_have_last_metadata));
+    memset(avrcp_last_metadata_len, 0, sizeof(avrcp_last_metadata_len));
+    ESP_LOGI(TAG, "AVRCP_MONITOR_CACHE_CLEAR:%s", reason ? reason : "unknown");
+}
+
 static void avrcp_request_snapshot_internal(const char *reason, bool force)
 {
     if (!avrcp_connected) {
@@ -602,6 +611,7 @@ static void avrcp_request_snapshot(const char *reason)
 
 static void avrcp_force_snapshot(const char *reason)
 {
+    avrcp_clear_snapshot_cache(reason);
     avrcp_request_snapshot_internal(reason, true);
 }
 
