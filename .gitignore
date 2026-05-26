@@ -1,0 +1,24 @@
+.DS_Store
+*.log
+*.rtf
+*.zip
+
+# PlatformIO / build outputs
+.pio/
+**/.pio/
+build/
+**/build/
+
+# Local IDE and Python state
+.vscode/
+**/.vscode/
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+
+# Android/local machine state, not part of this bridge repo
+ESP32OTAAppAndroid/
+local.properties
+.gradle/
+

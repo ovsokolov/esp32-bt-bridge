@@ -1,0 +1,118 @@
+{
+    "folders": [
+        {
+            "name": "ESP-A2DP-AG",
+            "path": "/Users/olegsokolov/Documents/esp32/ESP-A2DP"
+        },
+        {
+            "name": "ESP-A2DP-HF",
+            "path": "/Users/olegsokolov/Documents/esp32/ESP-A2DP-HF"
+        }
+    ],
+    "settings": {
+        "platformio-ide.activateProjectOnTextEditorChange": true,
+        "platformio-ide.autoRebuildAutocompleteIndex": false
+    },
+    "tasks": {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "AG: Build",
+                "type": "shell",
+                "command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+                "args": [
+                    "-d",
+                    "/Users/olegsokolov/Documents/esp32/ESP-A2DP",
+                    "run",
+                    "-e",
+                    "esp_a2dp_ag"
+                ],
+                "group": "build",
+                "problemMatcher": []
+            },
+            {
+                "label": "AG: Upload",
+                "type": "shell",
+                "command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+                "args": [
+                    "-d",
+                    "/Users/olegsokolov/Documents/esp32/ESP-A2DP",
+                    "run",
+                    "-e",
+                    "esp_a2dp_ag",
+                    "-t",
+                    "upload"
+                ],
+                "group": "build",
+                "problemMatcher": []
+            },
+            {
+                "label": "AG: Monitor",
+                "type": "shell",
+                "command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+                "args": [
+                    "-d",
+                    "/Users/olegsokolov/Documents/esp32/ESP-A2DP",
+                    "device",
+                    "monitor",
+                    "-e",
+                    "esp_a2dp_ag"
+                ],
+                "problemMatcher": []
+            },
+            {
+                "label": "HF: Build",
+                "type": "shell",
+                "command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+                "args": [
+                    "-d",
+                    "/Users/olegsokolov/Documents/esp32/ESP-A2DP-HF",
+                    "run",
+                    "-e",
+                    "esp_a2dp_hf"
+                ],
+                "group": "build",
+                "problemMatcher": []
+            },
+            {
+                "label": "HF: Upload",
+                "type": "shell",
+                "command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+                "args": [
+                    "-d",
+                    "/Users/olegsokolov/Documents/esp32/ESP-A2DP-HF",
+                    "run",
+                    "-e",
+                    "esp_a2dp_hf",
+                    "-t",
+                    "upload"
+                ],
+                "group": "build",
+                "problemMatcher": []
+            },
+            {
+                "label": "HF: Monitor",
+                "type": "shell",
+                "command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+                "args": [
+                    "-d",
+                    "/Users/olegsokolov/Documents/esp32/ESP-A2DP-HF",
+                    "device",
+                    "monitor",
+                    "-e",
+                    "esp_a2dp_hf"
+                ],
+                "problemMatcher": []
+            },
+            {
+                "label": "Bridge UI",
+                "type": "shell",
+                "command": "/Users/olegsokolov/Documents/esp32/ESP-A2DP/tools/run_bridge_control.sh",
+                "options": {
+                    "cwd": "/Users/olegsokolov/Documents/esp32/ESP-A2DP/tools"
+                },
+                "problemMatcher": []
+            }
+        ]
+    }
+}

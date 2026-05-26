@@ -1,0 +1,80 @@
+{
+	"folders": [
+		{
+			"name": "ESP-A2DP-HF",
+			"path": "."
+		},
+		{
+			"name": "ESP-A2DP-AG",
+			"path": "../ESP-A2DP"
+		}
+	],
+	"settings": {
+		"platformio-ide.activateProjectOnTextEditorChange": true
+	},
+	"tasks": {
+		"version": "2.0.0",
+		"tasks": [
+			{
+				"label": "HF: Build",
+				"type": "shell",
+				"command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+				"args": [
+					"-d",
+					"/Users/olegsokolov/Documents/esp32/ESP-A2DP-HF",
+					"run",
+					"-e",
+					"esp_a2dp_hf"
+				],
+				"group": "build",
+				"problemMatcher": []
+			},
+			{
+				"label": "HF: Upload",
+				"type": "shell",
+				"command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+				"args": [
+					"-d",
+					"/Users/olegsokolov/Documents/esp32/ESP-A2DP-HF",
+					"run",
+					"-e",
+					"esp_a2dp_hf",
+					"-t",
+					"upload"
+				],
+				"group": "build",
+				"problemMatcher": []
+			},
+			{
+				"label": "AG: Build",
+				"type": "shell",
+				"command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+				"args": [
+					"-d",
+					"/Users/olegsokolov/Documents/esp32/ESP-A2DP",
+					"run",
+					"-e",
+					"esp_a2dp_ag"
+				],
+				"group": "build",
+				"problemMatcher": []
+			},
+			{
+				"label": "AG: Upload",
+				"type": "shell",
+				"command": "/Users/olegsokolov/.platformio/penv/bin/pio",
+				"args": [
+					"-d",
+					"/Users/olegsokolov/Documents/esp32/ESP-A2DP",
+					"run",
+					"-e",
+					"esp_a2dp_ag",
+					"-t",
+					"upload"
+				],
+				"group": "build",
+				"problemMatcher": []
+			}
+		]
+	}
+}
