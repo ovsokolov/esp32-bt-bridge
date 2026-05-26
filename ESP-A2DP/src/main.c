@@ -87,7 +87,7 @@ static const char *TAG = "ESP_A2DP";
 #define I2S_READ_TIMEOUT_MS 50
 #define I2S_EMPTY_READ_DELAY_TICKS 1
 #define I2S_RX_SHORT_REPORT_PERIOD 32768
-#define PCM_RINGBUF_SIZE (24 * 1024)
+#define PCM_RINGBUF_SIZE (16 * 1024)
 #define I2S_RX_TASK_CHUNK_BYTES 1024
 #define RECONNECT_PERIOD_MS 3000
 #define POST_DISCOVERY_CONNECT_DELAY_MS 200
@@ -108,6 +108,8 @@ static const char *TAG = "ESP_A2DP";
 #define HFP_POST_HANGUP_SUPPRESS_MS 8000
 #define HFP_OUTBAND_RING_REPEAT_MS 2000
 #define BRIDGE_SNAPSHOT_MIN_INTERVAL_MS 1500
+#define BRIDGE_LOCAL_PAUSE_SETTLE_IGNORE_MS 1500
+#define BRIDGE_TRANSPORT_SETTLE_IGNORE_MS 2500
 #define A2DP_I2S_GATE_DURING_SCO 0
 #define BTA_AG_HANDLE_ALL_COMPAT 0xFFFF
 #define BTA_AG_IN_CALL_RES_COMPAT 11
@@ -296,12 +298,15 @@ static uint32_t bridge_media_pos_ms;
 static uint8_t bridge_track_index;
 static bool bridge_track_change_pending;
 static TickType_t bridge_snapshot_not_before;
+static TickType_t bridge_ignore_empty_playing_until;
+static TickType_t bridge_transport_settle_until;
 static char a2dp_rate_status[192] = "A2DP_AUDIO_RATE:codec=none sample_rate=0 channels=unknown";
 static char hfp_rate_status[96] = "HFP_HF_AUDIO_RATE:codec=none sample_rate=0 channels=mono frame=0";
 static bool hfp_ag_connected;
 static hfp_call_t hfp_calls[HFP_MAX_CALLS];
 static hfp_call_control_t hfp_call_control;
 static bool hfp_phone_clcc_batch_active;
+static bool hfp_phone_clcc_any_seen;
 static bool hfp_phone_clcc_seen[HFP_MAX_CALLS];
 static bool hfp_phone_indicator_waiting_for_clcc;
 static TickType_t hfp_phone_sync_suppress_until;
@@ -707,6 +712,51 @@ static void bridge_request_snapshot(const char *reason)
 
     bridge_snapshot_not_before = now + pdMS_TO_TICKS(BRIDGE_SNAPSHOT_MIN_INTERVAL_MS);
     ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_SNAPSHOT");
+}
+
+static void bridge_mark_local_pause_or_stop(void)
+{
+    bridge_ignore_empty_playing_until =
+        xTaskGetTickCount() + pdMS_TO_TICKS(BRIDGE_LOCAL_PAUSE_SETTLE_IGNORE_MS);
+}
+
+static bool bridge_should_ignore_empty_playing_status(uint32_t len, uint32_t pos,
+                                                     esp_avrc_playback_stat_t status)
+{
+    if (len != 0 || pos != 0 || status != ESP_AVRC_PLAYBACK_PLAYING) {
+        return false;
+    }
+    return bridge_ignore_empty_playing_until != 0 &&
+           (int32_t)(xTaskGetTickCount() - bridge_ignore_empty_playing_until) < 0;
+}
+
+static void bridge_mark_transport_settle(void)
+{
+    bridge_transport_settle_until =
+        xTaskGetTickCount() + pdMS_TO_TICKS(BRIDGE_TRANSPORT_SETTLE_IGNORE_MS);
+}
+
+static bool bridge_transport_settling(void)
+{
+    return bridge_transport_settle_until != 0 &&
+           (int32_t)(xTaskGetTickCount() - bridge_transport_settle_until) < 0;
+}
+
+static bool bridge_should_ignore_transport_status(uint32_t len, uint32_t pos,
+                                                  esp_avrc_playback_stat_t status)
+{
+    if (!bridge_transport_settling()) {
+        return false;
+    }
+    if (len == 0 && pos == 0) {
+        return true;
+    }
+    return status != ESP_AVRC_PLAYBACK_PLAYING;
+}
+
+static void bridge_clear_transport_settle(void)
+{
+    bridge_transport_settle_until = 0;
 }
 
 static void bridge_force_snapshot(const char *reason)
@@ -2000,25 +2050,26 @@ static void bt_app_avrc_tg_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param
         switch (param->psth_cmd.key_code) {
         case ESP_AVRC_PT_CMD_PLAY:
             ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PLAY");
+            bridge_mark_transport_settle();
             start_media(AUDIO_I2S);
             break;
         case ESP_AVRC_PT_CMD_PAUSE:
             ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PAUSE");
-            bridge_request_snapshot("avrcp");
+            bridge_mark_local_pause_or_stop();
             set_media_paused(ESP_AVRC_PLAYBACK_PAUSED);
             break;
         case ESP_AVRC_PT_CMD_STOP:
             ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_STOP");
-            bridge_request_snapshot("avrcp");
+            bridge_mark_local_pause_or_stop();
             set_media_paused(ESP_AVRC_PLAYBACK_STOPPED);
             break;
         case ESP_AVRC_PT_CMD_FORWARD:
             ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_NEXT");
-            bridge_request_snapshot("avrcp");
+            bridge_mark_transport_settle();
             break;
         case ESP_AVRC_PT_CMD_BACKWARD:
             ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PREVIOUS");
-            bridge_request_snapshot("avrcp");
+            bridge_mark_transport_settle();
             break;
         default:
             ESP_LOGI(TAG, "AVRCP_CMD_IGNORED:0x%02x",
@@ -2062,6 +2113,7 @@ static void bt_app_avrc_tg_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param
 
     case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
         ESP_LOGI(TAG, "AVRCP_SET_VOLUME:%u", param->set_abs_vol.volume);
+        ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_VOLUME:%u", param->set_abs_vol.volume);
         break;
 
     default:
@@ -2399,6 +2451,7 @@ static void hfp_reset_calls(void)
     memset(hfp_calls, 0, sizeof(hfp_calls));
     memset(&hfp_call_control, 0, sizeof(hfp_call_control));
     hfp_phone_clcc_batch_active = false;
+    hfp_phone_clcc_any_seen = false;
     memset(hfp_phone_clcc_seen, 0, sizeof(hfp_phone_clcc_seen));
     hfp_phone_indicator_waiting_for_clcc = false;
     hfp_phone_sync_suppress_until = 0;
@@ -2682,6 +2735,7 @@ static call_mode_t hfp_mode_from_clcc_status(int status)
 static void hfp_phone_clcc_begin(void)
 {
     hfp_phone_clcc_batch_active = true;
+    hfp_phone_clcc_any_seen = false;
     memset(hfp_phone_clcc_seen, 0, sizeof(hfp_phone_clcc_seen));
     ESP_LOGI(TAG, "HFP_AG_PHONE_CLCC_BEGIN");
 }
@@ -2694,6 +2748,16 @@ static void hfp_phone_clcc_end(void)
     }
 
     hfp_phone_clcc_batch_active = false;
+    if (!hfp_phone_clcc_any_seen && hfp_call_count() > 0) {
+        hfp_sync_phone_state();
+        hfp_report_indicators();
+        hfp_phone_indicator_waiting_for_clcc = false;
+        hfp_log_call_state(hfp_has_mode(CALL_INCOMING) ?
+                           "PHONE_CLCC_END_EMPTY_PRESERVE_INCOMING" :
+                           "PHONE_CLCC_END_EMPTY_PRESERVE_CALL");
+        return;
+    }
+
     for (size_t i = 0; i < HFP_MAX_CALLS; i++) {
         if (hfp_calls[i].in_use && !hfp_phone_clcc_seen[i]) {
             hfp_clear_call(&hfp_calls[i]);
@@ -2734,6 +2798,7 @@ static void hfp_sync_from_hf_clcc(const char *payload)
         return;
     }
     if (idx >= 1 && idx <= HFP_MAX_CALLS) {
+        hfp_phone_clcc_any_seen = true;
         hfp_phone_clcc_seen[idx - 1] = true;
     }
 
@@ -2802,9 +2867,26 @@ static void hfp_sync_from_hf_cind_call(int call_status)
 
 static void hfp_sync_from_hf_cind_setup(int setup_status)
 {
-    if (setup_status != 0 && hfp_phone_sync_suppressed() && hfp_call_count() == 0) {
+    if (setup_status != 0 && hfp_phone_sync_suppressed() && hfp_call_count() == 0 &&
+        setup_status != 1) {
         hfp_log_call_state("PHONE_CIND_SETUP_SUPPRESSED");
         return;
+    }
+    if (setup_status == 1) {
+        hfp_phone_sync_suppress_until = 0;
+    }
+    if (setup_status == 1 && !hfp_has_mode(CALL_INCOMING) && !hfp_has_established_call()) {
+        hfp_call_t *call = hfp_add_call(CALL_INCOMING,
+                                        ESP_HF_CURRENT_CALL_DIRECTION_INCOMING,
+                                        "Unknown");
+        if (call != NULL) {
+            hfp_ag_set_inband_ring(false);
+            esp_hf_ag_answer_call(remote_bda, hfp_report_num_active(), hfp_report_num_held(),
+                                  hfp_call_status(), hfp_call_setup_status(),
+                                  call->number, ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+            hfp_report_indicators();
+            hfp_log_call_state("PHONE_CIND_SETUP_INCOMING_FALLBACK");
+        }
     }
     if (setup_status == 0 && !hfp_has_established_call()) {
         for (size_t i = 0; i < HFP_MAX_CALLS; i++) {
@@ -3479,6 +3561,14 @@ static void handle_bridge_rx(const char *payload)
         if (sscanf(payload + 13, "len=%u pos=%u status=%d", &len, &pos, &status) == 3) {
             esp_avrc_playback_stat_t car_status =
                 bridge_car_playback_status((esp_avrc_playback_stat_t)status);
+            if (bridge_should_ignore_transport_status(len, pos, car_status)) {
+                ESP_LOGI(TAG, "BRIDGE_RX:%s:IGNORED_TRANSPORT_SETTLE", payload);
+                return;
+            }
+            if (bridge_should_ignore_empty_playing_status(len, pos, car_status)) {
+                ESP_LOGI(TAG, "BRIDGE_RX:%s:IGNORED_LOCAL_PAUSE_SETTLE", payload);
+                return;
+            }
             bool pos_changed = bridge_media_pos_ms != pos;
             bool status_changed = avrc_play_status != car_status;
             if (bridge_media_len_ms == len && !pos_changed && !status_changed) {
@@ -3505,6 +3595,13 @@ static void handle_bridge_rx(const char *payload)
         int status = atoi(payload + 22);
         esp_avrc_playback_stat_t car_status =
             bridge_car_playback_status((esp_avrc_playback_stat_t)status);
+        if (bridge_transport_settling() && car_status != ESP_AVRC_PLAYBACK_PLAYING) {
+            ESP_LOGI(TAG, "BRIDGE_RX:%s:IGNORED_TRANSPORT_SETTLE", payload);
+            return;
+        }
+        if (car_status == ESP_AVRC_PLAYBACK_PLAYING) {
+            bridge_clear_transport_settle();
+        }
         if (avrc_play_status != car_status) {
             ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
             set_bridge_play_status(car_status);
@@ -3515,15 +3612,22 @@ static void handle_bridge_rx(const char *payload)
             if (attr == 1) {
                 char title[sizeof(bridge_media_title)];
                 bridge_copy_quoted_text(payload, title, sizeof(title));
+                if (title[0] == '\0' && bridge_media_title[0] != '\0') {
+                    return;
+                }
                 if (strcmp(bridge_media_title, title) != 0) {
                     ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
                     snprintf(bridge_media_title, sizeof(bridge_media_title), "%s", title);
                     bridge_track_index++;
                     bridge_track_change_pending = true;
+                    bridge_clear_transport_settle();
                 }
             } else if (attr == 2) {
                 char artist[sizeof(bridge_media_artist)];
                 bridge_copy_quoted_text(payload, artist, sizeof(artist));
+                if (artist[0] == '\0' && bridge_media_artist[0] != '\0') {
+                    return;
+                }
                 if (strcmp(bridge_media_artist, artist) != 0) {
                     ESP_LOGI(TAG, "BRIDGE_RX:%s", payload);
                     snprintf(bridge_media_artist, sizeof(bridge_media_artist), "%s", artist);
@@ -3583,25 +3687,26 @@ static void handle_uart_command(char *line)
         print_board_id();
     } else if (strcmp(line, "PLAY") == 0) {
         ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PLAY");
+        bridge_mark_transport_settle();
         start_media(AUDIO_I2S);
     } else if (strcmp(line, "I2S") == 0) {
         start_media(AUDIO_I2S);
     } else if (strcmp(line, "PAUSE") == 0) {
         ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PAUSE");
-        bridge_request_snapshot("avrcp");
+        bridge_mark_local_pause_or_stop();
         set_media_paused(ESP_AVRC_PLAYBACK_PAUSED);
     } else if (strcmp(line, "STOP") == 0) {
         ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_STOP");
-        bridge_request_snapshot("avrcp");
+        bridge_mark_local_pause_or_stop();
         set_media_paused(ESP_AVRC_PLAYBACK_STOPPED);
     } else if (strcmp(line, "SIMULATE") == 0) {
         start_media(AUDIO_SIMULATE);
     } else if (strcmp(line, "NEXT") == 0) {
         ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_NEXT");
-        bridge_request_snapshot("avrcp");
+        bridge_mark_transport_settle();
     } else if (strcmp(line, "PREVIOUS") == 0) {
         ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PREVIOUS");
-        bridge_request_snapshot("avrcp");
+        bridge_mark_transport_settle();
     } else if (strcmp(line, "CALL_IN") == 0) {
         hfp_simulate_incoming_call(NULL);
     } else if (strncmp(line, "CALL_IN:", 8) == 0) {

@@ -16,6 +16,11 @@ They patch PlatformIO's installed framework package, not this project's source t
   - Adds HFP AG three-way-call feature advertising.
   - Forwards car `AT+CHLD` commands to the application as `ESP_HF_UNAT_RESPONSE_EVT` strings like `+CHLD=2`.
 
+- `framework-espidf-6.0.1-bluedroid-a2dp-44k1-only.patch`
+  - Forces SBC A2DP sink capabilities to advertise 44.1 kHz only.
+  - Makes sink-side source selection prefer 44.1 kHz before 48 kHz.
+  - AG/source side already advertises 44.1 kHz only in the current ESP-IDF codec config.
+
 ## Apply
 
 From this repo root:
@@ -24,6 +29,7 @@ From this repo root:
 FRAMEWORK=/Users/olegsokolov/.platformio/packages/framework-espidf
 patch -d "$FRAMEWORK" -p1 < patches/framework-espidf-6.0.1-bluedroid-avrcp-target.patch
 patch -d "$FRAMEWORK" -p1 < patches/framework-espidf-6.0.1-bluedroid-hfp-ag-chld.patch
+patch -d "$FRAMEWORK" -p1 < patches/framework-espidf-6.0.1-bluedroid-a2dp-44k1-only.patch
 ```
 
 Then rebuild both projects so PlatformIO recompiles the patched Bluedroid files:
@@ -32,4 +38,3 @@ Then rebuild both projects so PlatformIO recompiles the patched Bluedroid files:
 /Users/olegsokolov/.platformio/penv/bin/pio run -d ESP-A2DP
 /Users/olegsokolov/.platformio/penv/bin/pio run -d ESP-A2DP-HF
 ```
-

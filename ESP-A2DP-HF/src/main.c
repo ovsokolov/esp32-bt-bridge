@@ -90,7 +90,8 @@ static const char *TAG = "ESP_A2DP_HF";
 #define AVRCP_TRACK_CHANGE_SNAPSHOT_DELAY_MS 700
 #define HFP_POST_CALL_AVRCP_PLAY_DELAY_WINDOW_MS 8000
 #define HFP_POST_CALL_AVRCP_PLAY_DELAY_MS 700
-#define PCM_RINGBUF_SIZE (24 * 1024)
+#define PCM_RINGBUF_SIZE (16 * 1024)
+#define A2DP_PCM_GAIN_Q8 768
 #define HF_BUILD_TAG "hf-hfp-forward-ring-20260526"
 #define A2DP_I2S_GATE_DURING_SCO 0
 
@@ -134,6 +135,8 @@ static uint32_t i2s_tx_report_next = 32768;
 static uint32_t pcm_ring_drop_bytes;
 static uint32_t pcm_ring_drop_count;
 static uint16_t i2s_tx_peak;
+static uint16_t a2dp_input_peak;
+static int16_t a2dp_gain_samples[1024];
 static i2s_chan_handle_t i2s_tx;
 static RingbufHandle_t pcm_ringbuf;
 static bool sco_pcm_gpio_active;
@@ -715,6 +718,21 @@ static void send_avrcp_passthrough(uint8_t key_code)
     }
 }
 
+static void send_avrcp_absolute_volume(int volume)
+{
+    if (!avrcp_connected) {
+        ESP_LOGW(TAG, "AVRCP_VOLUME_NOT_CONNECTED:%d", volume);
+        return;
+    }
+    if (volume < 0) {
+        volume = 0;
+    } else if (volume > 127) {
+        volume = 127;
+    }
+    esp_err_t err = esp_avrc_ct_send_set_absolute_volume_cmd(next_tl(), (uint8_t)volume);
+    ESP_LOGI(TAG, "AVRCP_VOLUME_TX:%d err=0x%x", volume, err);
+}
+
 static bool hfp_post_call_play_delay_active(void)
 {
     return hfp_post_call_play_delay_until != 0 &&
@@ -1025,7 +1043,7 @@ static void handle_uart_command(char *line)
     } else if (strcmp(line, "HELP") == 0) {
         log_board_id();
         ESP_LOGI(TAG, "CMDS:DISCOVERABLE CONNECTABLE HIDDEN CLEAR_PAIRING SCAN STOP_SCAN CONNECT:<bda> DISCONNECT STATUS");
-        ESP_LOGI(TAG, "CMDS:AVRCP_PLAY AVRCP_PAUSE AVRCP_STOP AVRCP_NEXT AVRCP_PREVIOUS AVRCP_STATUS AVRCP_METADATA AVRCP_RN");
+        ESP_LOGI(TAG, "CMDS:AVRCP_PLAY AVRCP_PAUSE AVRCP_STOP AVRCP_NEXT AVRCP_PREVIOUS AVRCP_STATUS AVRCP_METADATA AVRCP_RN AVRCP_VOLUME:<0-127>");
         ESP_LOGI(TAG, "CMDS:HF_ANSWER HF_HANGUP HF_CLCC HF_COPS HF_CNUM HF_AUDIO_CONNECT HF_AUDIO_DISCONNECT HF_CHLD:<0|1|2|3|4|1x|2x> HF_VOL:<0-15> HF_DTMF:<char> HF_NREC");
     } else if (strcmp(line, "SCAN") == 0) {
         esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
@@ -1082,6 +1100,8 @@ static void handle_uart_command(char *line)
         avrcp_request_snapshot("uart");
     } else if (strcmp(line, "AVRCP_SNAPSHOT") == 0) {
         avrcp_force_snapshot("bridge");
+    } else if (strncmp(line, "AVRCP_VOLUME:", 13) == 0) {
+        send_avrcp_absolute_volume(atoi(line + 13));
     } else if (strcmp(line, "HF_ANSWER") == 0) {
         esp_hf_client_answer_call();
     } else if (strcmp(line, "HF_HANGUP") == 0 || strcmp(line, "HF_REJECT") == 0) {
@@ -1231,6 +1251,18 @@ static bool pcm_ringbuf_send_latest(const uint8_t *data, uint32_t len)
     return false;
 }
 
+static int16_t a2dp_apply_gain_sample(int16_t sample)
+{
+    int32_t amplified = ((int32_t)sample * A2DP_PCM_GAIN_Q8) / 256;
+    if (amplified > INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (amplified < INT16_MIN) {
+        return INT16_MIN;
+    }
+    return (int16_t)amplified;
+}
+
 static void pcm_ringbuf_drain(void)
 {
     if (pcm_ringbuf == NULL) {
@@ -1284,8 +1316,10 @@ static void i2s_tx_task(void *arg)
         if (i2s_tx_bytes >= i2s_tx_report_next) {
             ESP_LOGI(TAG,
                      "I2S_TX:bytes=%" PRIu32 " short=%" PRIu32
-                     " rx_pcm=%" PRIu32 " peak=%u ring_drop=%" PRIu32 "/%" PRIu32,
-                     i2s_tx_bytes, i2s_tx_short_count, a2dp_rx_bytes, i2s_tx_peak,
+                     " rx_pcm=%" PRIu32 " in_peak=%u peak=%u gain_q8=%u"
+                     " ring_drop=%" PRIu32 "/%" PRIu32,
+                     i2s_tx_bytes, i2s_tx_short_count, a2dp_rx_bytes,
+                     a2dp_input_peak, i2s_tx_peak, A2DP_PCM_GAIN_Q8,
                      pcm_ring_drop_count, pcm_ring_drop_bytes);
             i2s_tx_report_next = i2s_tx_bytes + 32768;
         }
@@ -1301,22 +1335,53 @@ static void a2dp_sink_data_cb(const uint8_t *data, uint32_t len)
             return;
         }
         a2dp_rx_bytes += len;
-        uint16_t peak = 0;
+        uint16_t input_peak = 0;
+        uint16_t output_peak = 0;
         const int16_t *samples = (const int16_t *)data;
         const uint32_t sample_count = len / sizeof(int16_t);
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int32_t sample = samples[i];
-            uint16_t abs_sample = (uint16_t)(sample < 0 ? -sample : sample);
-            if (abs_sample > peak) {
-                peak = abs_sample;
+
+        const uint32_t gain_chunk_samples = sizeof(a2dp_gain_samples) / sizeof(a2dp_gain_samples[0]);
+        uint32_t sample_offset = 0;
+
+        while (sample_offset < sample_count) {
+            uint32_t chunk_samples = sample_count - sample_offset;
+            if (chunk_samples > gain_chunk_samples) {
+                chunk_samples = gain_chunk_samples;
+            }
+
+            for (uint32_t i = 0; i < chunk_samples; i++) {
+                int16_t sample = samples[sample_offset + i];
+                int16_t gained = a2dp_apply_gain_sample(sample);
+                uint16_t abs_input = (uint16_t)(sample < 0 ? -sample : sample);
+                uint16_t abs_output = (uint16_t)(gained < 0 ? -gained : gained);
+                if (abs_input > input_peak) {
+                    input_peak = abs_input;
+                }
+                if (abs_output > output_peak) {
+                    output_peak = abs_output;
+                }
+                a2dp_gain_samples[i] = gained;
+            }
+
+            if (!pcm_ringbuf_send_latest((const uint8_t *)a2dp_gain_samples,
+                                         chunk_samples * sizeof(int16_t))) {
+                ESP_LOGW(TAG, "PCM_RING_DROP:count=%" PRIu32 " bytes=%" PRIu32,
+                         pcm_ring_drop_count, pcm_ring_drop_bytes);
+            }
+
+            sample_offset += chunk_samples;
+        }
+
+        uint32_t tail_offset = sample_count * sizeof(int16_t);
+        if (tail_offset < len) {
+            if (!pcm_ringbuf_send_latest(data + tail_offset, len - tail_offset)) {
+                ESP_LOGW(TAG, "PCM_RING_DROP:count=%" PRIu32 " bytes=%" PRIu32,
+                         pcm_ring_drop_count, pcm_ring_drop_bytes);
             }
         }
-        i2s_tx_peak = peak;
 
-        if (!pcm_ringbuf_send_latest(data, len)) {
-            ESP_LOGW(TAG, "PCM_RING_DROP:count=%" PRIu32 " bytes=%" PRIu32,
-                     pcm_ring_drop_count, pcm_ring_drop_bytes);
-        }
+        a2dp_input_peak = input_peak;
+        i2s_tx_peak = output_peak;
     }
 }
 
