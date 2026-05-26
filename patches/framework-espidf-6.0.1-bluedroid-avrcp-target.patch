@@ -1,0 +1,245 @@
+--- a/components/bt/host/bluedroid/btc/profile/std/avrc/btc_avrc.c
++++ b/components/bt/host/bluedroid/btc/profile/std/avrc/btc_avrc.c
+@@ -12,6 +12,8 @@
+  *
+  *****************************************************************************/
+ #include "common/bt_target.h"
++#include <inttypes.h>
++#include <stdio.h>
+ #include <string.h>
+ #include "bta/bta_api.h"
+ #include "bta/bta_av_api.h"
+@@ -22,11 +24,14 @@
+ #include "btc_avrc.h"
+ #include "btc/btc_manage.h"
+ #include "esp_avrc_api.h"
++#include "esp_log.h"
+ #include "osi/mutex.h"
+ #include "osi/allocator.h"
+ 
+ #if BTC_AV_INCLUDED
+ 
++static const char *BTC_AVRC_TG_TAG = "BT_AVRC_TG";
++
+ static UINT8 opcode_from_pdu(UINT8 pdu);
+ static void send_reject_response (UINT8 rc_handle, UINT8 label, UINT8 pdu, UINT8 status);
+ static void handle_rc_connect (tBTA_AV_RC_OPEN *p_rc_open);
+@@ -35,7 +40,37 @@
+ static void handle_rc_metamsg_cmd ( tBTA_AV_META_MSG *p_meta_msg);
+ static void handle_rc_metamsg_rsp ( tBTA_AV_META_MSG *p_remote_rsp);
+ static void btc_rc_upstreams_evt(UINT16 event, tAVRC_COMMAND *pavrc_cmd, UINT8 ctype, UINT8 label);
++
++__attribute__((weak)) UINT8 esp_avrc_tg_app_play_status(void)
++{
++    return AVRC_PLAYSTATE_PAUSED;
++}
++
++__attribute__((weak)) UINT32 esp_avrc_tg_app_song_len_ms(void)
++{
++    return 0;
++}
++
++__attribute__((weak)) UINT32 esp_avrc_tg_app_song_pos_ms(void)
++{
++    return 0;
++}
++
++__attribute__((weak)) UINT8 esp_avrc_tg_app_track_index(void)
++{
++    return 0;
++}
+ 
++__attribute__((weak)) const char *esp_avrc_tg_app_track_title(void)
++{
++    return "ESP32";
++}
++
++__attribute__((weak)) const char *esp_avrc_tg_app_track_artist(void)
++{
++    return "ESP32 A2DP";
++}
++
+ /*****************************************************************************
+ **  Static variables
+ ******************************************************************************/
+@@ -77,7 +112,7 @@
+ static uint16_t s_psth_supported_cmd[8];
+ 
+ const static uint16_t cs_rn_allowed_evt = \
+-        0x2000; /* bit mask: 0=rsvd, 1=play_status, 2=track_chg, 3=reached_end,
++        0x2066; /* bit mask: 0=rsvd, 1=play_status, 2=track_chg, 3=reached_end,
+                              4=reached_start, 5=pos_chg, 6=batt_status, 7=sys_status_chg,
+                              8=player_app_setting, 9=now_playing_content, 10=avail_players, 11=addressed_player,
+                              12=UID, 13=volume_chg */
+@@ -740,8 +775,35 @@
+     param.play_status_rsp.play_status = rsp->play_status;
+ 
+     btc_avrc_ct_cb_to_app(ESP_AVRC_CT_PLAY_STATUS_RSP_EVT, &param);
++}
++
++static BOOLEAN app_metadata_attr_requested(const tAVRC_GET_ELEM_ATTRS_CMD *cmd, UINT32 attr_id)
++{
++    if (cmd->num_attr == 0) {
++        return TRUE;
++    }
++
++    for (UINT8 i = 0; i < cmd->num_attr; i++) {
++        if (cmd->attrs[i] == attr_id) {
++            return TRUE;
++        }
++    }
++    return FALSE;
+ }
+ 
++static void app_metadata_add_attr(tAVRC_ATTR_ENTRY *attrs, UINT8 *num_attr,
++                                  UINT32 attr_id, const char *value)
++{
++    if (value == NULL) {
++        value = "";
++    }
++    attrs[*num_attr].attr_id = attr_id;
++    attrs[*num_attr].name.charset_id = AVRC_CHARSET_ID_UTF8;
++    attrs[*num_attr].name.str_len = (UINT16)strlen(value);
++    attrs[*num_attr].name.p_str = (UINT8 *)value;
++    (*num_attr)++;
++}
++
+ /***************************************************************************
+  *  Function       handle_rc_metamsg_cmd
+  *
+@@ -836,11 +898,83 @@
+         btc_avrc_tg_cb_to_app(ESP_AVRC_TG_SET_PLAYER_APP_VALUE_EVT, &param);
+     }
+     break;
+-    case AVRC_PDU_GET_PLAY_STATUS:
+-    case AVRC_PDU_GET_ELEMENT_ATTR:
+-    case AVRC_PDU_INFORM_DISPLAY_CHARSET:
+-    //todo: check the valid response for these PDUs
+-    case AVRC_PDU_LIST_PLAYER_APP_ATTR:
++    case AVRC_PDU_GET_PLAY_STATUS: {
++        tAVRC_RESPONSE avrc_rsp;
++        memset(&avrc_rsp, 0, sizeof(tAVRC_RESPONSE));
++        avrc_rsp.get_play_status.opcode = opcode_from_pdu(AVRC_PDU_GET_PLAY_STATUS);
++        avrc_rsp.get_play_status.pdu = AVRC_PDU_GET_PLAY_STATUS;
++        avrc_rsp.get_play_status.status = AVRC_STS_NO_ERROR;
++        avrc_rsp.get_play_status.song_len = esp_avrc_tg_app_song_len_ms();
++        avrc_rsp.get_play_status.song_pos = esp_avrc_tg_app_song_pos_ms();
++        avrc_rsp.get_play_status.play_status = esp_avrc_tg_app_play_status();
++        ESP_LOGI(BTC_AVRC_TG_TAG, "GET_PLAY_STATUS_RSP:len=%" PRIu32 " pos=%" PRIu32 " status=%u",
++                 avrc_rsp.get_play_status.song_len,
++                 avrc_rsp.get_play_status.song_pos,
++                 avrc_rsp.get_play_status.play_status);
++        send_metamsg_rsp(btc_rc_cb.rc_handle, label, ctype, &avrc_rsp);
++    }
++    break;
++    case AVRC_PDU_GET_ELEMENT_ATTR: {
++        char track_num[8];
++        char playing_time[16];
++        tAVRC_ATTR_ENTRY attrs[4];
++        UINT8 num_attr = 0;
++        tAVRC_RESPONSE avrc_rsp;
++        snprintf(track_num, sizeof(track_num), "%u",
++                 (unsigned)(esp_avrc_tg_app_track_index() + 1));
++        snprintf(playing_time, sizeof(playing_time), "%u",
++                 (unsigned)esp_avrc_tg_app_song_len_ms());
++
++        if (app_metadata_attr_requested(&pavrc_cmd->get_elem_attrs, AVRC_MEDIA_ATTR_ID_TITLE)) {
++            app_metadata_add_attr(attrs, &num_attr, AVRC_MEDIA_ATTR_ID_TITLE,
++                                  esp_avrc_tg_app_track_title());
++        }
++        if (app_metadata_attr_requested(&pavrc_cmd->get_elem_attrs, AVRC_MEDIA_ATTR_ID_ARTIST)) {
++            app_metadata_add_attr(attrs, &num_attr, AVRC_MEDIA_ATTR_ID_ARTIST,
++                                  esp_avrc_tg_app_track_artist());
++        }
++        if (app_metadata_attr_requested(&pavrc_cmd->get_elem_attrs, AVRC_MEDIA_ATTR_ID_TRACK_NUM)) {
++            app_metadata_add_attr(attrs, &num_attr, AVRC_MEDIA_ATTR_ID_TRACK_NUM,
++                                  track_num);
++        }
++        if (app_metadata_attr_requested(&pavrc_cmd->get_elem_attrs, AVRC_MEDIA_ATTR_ID_PLAYING_TIME)) {
++            app_metadata_add_attr(attrs, &num_attr, AVRC_MEDIA_ATTR_ID_PLAYING_TIME,
++                                  playing_time);
++        }
++
++        memset(&avrc_rsp, 0, sizeof(tAVRC_RESPONSE));
++        avrc_rsp.get_elem_attrs.opcode = opcode_from_pdu(AVRC_PDU_GET_ELEMENT_ATTR);
++        avrc_rsp.get_elem_attrs.pdu = AVRC_PDU_GET_ELEMENT_ATTR;
++        avrc_rsp.get_elem_attrs.status = AVRC_STS_NO_ERROR;
++        avrc_rsp.get_elem_attrs.num_attr = num_attr;
++        avrc_rsp.get_elem_attrs.p_attrs = attrs;
++        ESP_LOGI(BTC_AVRC_TG_TAG,
++                 "GET_ELEMENT_ATTR_RSP:num=%u title=\"%s\" artist=\"%s\" len=%u",
++                 num_attr, esp_avrc_tg_app_track_title(),
++                 esp_avrc_tg_app_track_artist(),
++                 (unsigned)esp_avrc_tg_app_song_len_ms());
++        send_metamsg_rsp(btc_rc_cb.rc_handle, label, ctype, &avrc_rsp);
++    }
++    break;
++    case AVRC_PDU_INFORM_DISPLAY_CHARSET: {
++        tAVRC_RESPONSE avrc_rsp;
++        memset(&avrc_rsp, 0, sizeof(tAVRC_RESPONSE));
++        avrc_rsp.rsp.opcode = opcode_from_pdu(AVRC_PDU_INFORM_DISPLAY_CHARSET);
++        avrc_rsp.rsp.pdu = AVRC_PDU_INFORM_DISPLAY_CHARSET;
++        avrc_rsp.rsp.status = AVRC_STS_NO_ERROR;
++        send_metamsg_rsp(btc_rc_cb.rc_handle, label, ctype, &avrc_rsp);
++    }
++    break;
++    case AVRC_PDU_LIST_PLAYER_APP_ATTR: {
++        tAVRC_RESPONSE avrc_rsp;
++        memset(&avrc_rsp, 0, sizeof(tAVRC_RESPONSE));
++        avrc_rsp.list_app_attr.opcode = opcode_from_pdu(AVRC_PDU_LIST_PLAYER_APP_ATTR);
++        avrc_rsp.list_app_attr.pdu = AVRC_PDU_LIST_PLAYER_APP_ATTR;
++        avrc_rsp.list_app_attr.status = AVRC_STS_NO_ERROR;
++        avrc_rsp.list_app_attr.num_attr = 0;
++        send_metamsg_rsp(btc_rc_cb.rc_handle, label, ctype, &avrc_rsp);
++    }
++    break;
+     case AVRC_PDU_LIST_PLAYER_APP_VALUES:
+     case AVRC_PDU_GET_CUR_PLAYER_APP_VALUE:
+     case AVRC_PDU_GET_PLAYER_APP_ATTR_TEXT:
+@@ -1629,6 +1763,19 @@
+     case ESP_AVRC_RN_VOLUME_CHANGE:
+         avrc_rsp.reg_notif.param.volume = param->volume;
+         break;
++    case ESP_AVRC_RN_PLAY_STATUS_CHANGE:
++        avrc_rsp.reg_notif.param.play_status = param->playback;
++        break;
++    case ESP_AVRC_RN_TRACK_CHANGE:
++        memcpy(avrc_rsp.reg_notif.param.track, param->elm_id,
++               sizeof(avrc_rsp.reg_notif.param.track));
++        break;
++    case ESP_AVRC_RN_PLAY_POS_CHANGED:
++        avrc_rsp.reg_notif.param.play_pos = param->play_pos;
++        break;
++    case ESP_AVRC_RN_BATTERY_STATUS_CHANGE:
++        avrc_rsp.reg_notif.param.battery_status = param->batt;
++        break;
+     // todo: implement other event notifications
+     default:
+         BTC_TRACE_WARNING("%s : Unhandled event ID : 0x%x", __FUNCTION__, event_id);
+@@ -1637,7 +1784,7 @@
+ 
+     avrc_rsp.reg_notif.pdu = AVRC_PDU_REGISTER_NOTIFICATION;
+     avrc_rsp.reg_notif.opcode = opcode_from_pdu(AVRC_PDU_REGISTER_NOTIFICATION);
+-    avrc_rsp.get_play_status.status = AVRC_STS_NO_ERROR;
++    avrc_rsp.reg_notif.status = AVRC_STS_NO_ERROR;
+ 
+     /* Send the response. */
+     send_metamsg_rsp(btc_rc_cb.rc_handle, btc_rc_cb.rc_ntf[event_id - 1].label,
+--- a/components/bt/host/bluedroid/bta/av/bta_av_act.c
++++ b/components/bt/host/bluedroid/bta/av/bta_av_act.c
+@@ -803,6 +803,15 @@
+             /* Setting of a value by CT does not implicitly mean that the setting will take effect on TG. */
+             /* The setting shall take effect after a play command from CT. */
+             break;
++        case AVRC_PDU_LIST_PLAYER_APP_ATTR:
++        case AVRC_PDU_LIST_PLAYER_APP_VALUES:
++        case AVRC_PDU_GET_CUR_PLAYER_APP_VALUE:
++        case AVRC_PDU_GET_PLAYER_APP_ATTR_TEXT:
++        case AVRC_PDU_GET_PLAYER_APP_VALUE_TEXT:
++        case AVRC_PDU_GET_ELEMENT_ATTR:
++        case AVRC_PDU_GET_PLAY_STATUS:
++        case AVRC_PDU_INFORM_DISPLAY_CHARSET:
++            break;
+         default:
+             APPL_TRACE_WARNING("%s unhandled RC vendor PDU: 0x%x", __FUNCTION__, pdu);
+             break;

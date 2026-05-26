@@ -2,11 +2,18 @@
 
 This project currently depends on a local ESP-IDF Bluedroid patch because the stock PlatformIO ESP-IDF 5.5.0 package does not expose enough AVRCP Target hooks for the Hyundai head unit test case.
 
+The reproducible patch files are now stored in the parent repo:
+
+```text
+patches/framework-espidf-6.0.1-bluedroid-avrcp-target.patch
+patches/framework-espidf-6.0.1-bluedroid-hfp-ag-chld.patch
+```
+
 Patch targets:
 
 ```text
-/Users/dimitri/.platformio/packages/framework-espidf/components/bt/host/bluedroid/btc/profile/std/avrc/btc_avrc.c
-/Users/dimitri/.platformio/packages/framework-espidf/components/bt/host/bluedroid/bta/av/bta_av_act.c
+/Users/olegsokolov/.platformio/packages/framework-espidf/components/bt/host/bluedroid/btc/profile/std/avrc/btc_avrc.c
+/Users/olegsokolov/.platformio/packages/framework-espidf/components/bt/host/bluedroid/bta/av/bta_av_act.c
 ```
 
 On another machine, use the same relative path under that machine's PlatformIO package directory:
@@ -331,6 +338,8 @@ bta_av_proc_meta_cmd unhandled RC vendor PDU: 0x30
 ## Maintenance Warning
 
 This patch modifies PlatformIO's installed ESP-IDF package, not the project source tree. PlatformIO package reinstall/update can overwrite it. If metadata or play/pause synchronization regresses after a dependency update, reapply this patch first.
+
+Prefer reapplying the repo patch files in `patches/` instead of manually editing the PlatformIO package.
 
 ## HFP AG Multi-Call Testing Patch
 
