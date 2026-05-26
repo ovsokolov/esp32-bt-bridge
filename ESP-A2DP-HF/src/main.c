@@ -88,6 +88,8 @@ static const char *TAG = "ESP_A2DP_HF";
 #define AUTO_RECONNECT_PERIOD_MS 5000
 #define AVRCP_SNAPSHOT_MIN_INTERVAL_MS 1500
 #define AVRCP_TRACK_CHANGE_SNAPSHOT_DELAY_MS 700
+#define HFP_POST_CALL_AVRCP_PLAY_DELAY_WINDOW_MS 8000
+#define HFP_POST_CALL_AVRCP_PLAY_DELAY_MS 700
 #define PCM_RINGBUF_SIZE (24 * 1024)
 #define HF_BUILD_TAG "hf-hfp-forward-ring-20260526"
 #define A2DP_I2S_GATE_DURING_SCO 0
@@ -107,6 +109,8 @@ static bool hf_ready;
 static volatile bool a2dp_audio_started;
 static volatile bool hf_clcc_task_running;
 static volatile bool hf_clcc_batch_pending;
+static TickType_t hfp_post_call_play_delay_until;
+static volatile bool avrcp_play_delay_task_running;
 static esp_avrc_rn_evt_cap_mask_t avrcp_peer_rn_caps;
 static bool avrcp_have_rn_caps;
 static uint8_t avrcp_tl;
@@ -643,6 +647,15 @@ static void avrcp_schedule_delayed_snapshot(const char *reason)
     }
 }
 
+static void hfp_mark_post_call_play_delay(const char *reason)
+{
+    hfp_post_call_play_delay_until = xTaskGetTickCount() +
+                                     pdMS_TO_TICKS(HFP_POST_CALL_AVRCP_PLAY_DELAY_WINDOW_MS);
+    ESP_LOGI(TAG, "AVRCP_PLAY_POST_CALL_WINDOW:%s %ums",
+             reason ? reason : "unknown",
+             HFP_POST_CALL_AVRCP_PLAY_DELAY_WINDOW_MS);
+}
+
 static void avrcp_register_event(uint8_t event_id, const char *reason)
 {
     if (!avrcp_connected) {
@@ -700,6 +713,44 @@ static void send_avrcp_passthrough(uint8_t key_code)
     } else {
         ESP_LOGI(TAG, "AVRCP_TX:key=0x%02x", key_code);
     }
+}
+
+static bool hfp_post_call_play_delay_active(void)
+{
+    return hfp_post_call_play_delay_until != 0 &&
+           (int32_t)(xTaskGetTickCount() - hfp_post_call_play_delay_until) < 0;
+}
+
+static void delayed_avrcp_play_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(HFP_POST_CALL_AVRCP_PLAY_DELAY_MS));
+    send_avrcp_passthrough(ESP_AVRC_PT_CMD_PLAY);
+    avrcp_schedule_delayed_snapshot("bridge_play_delayed");
+    avrcp_play_delay_task_running = false;
+    vTaskDelete(NULL);
+}
+
+static void send_avrcp_play_command(void)
+{
+    if (hfp_post_call_play_delay_active()) {
+        if (avrcp_play_delay_task_running) {
+            ESP_LOGI(TAG, "AVRCP_PLAY_DELAY_SKIPPED:pending");
+            return;
+        }
+        avrcp_play_delay_task_running = true;
+        BaseType_t ok = xTaskCreate(delayed_avrcp_play_task, "avrcp_play",
+                                    3072, NULL, 5, NULL);
+        if (ok == pdPASS) {
+            ESP_LOGI(TAG, "AVRCP_PLAY_DELAY:%ums",
+                     HFP_POST_CALL_AVRCP_PLAY_DELAY_MS);
+            return;
+        }
+        avrcp_play_delay_task_running = false;
+        ESP_LOGW(TAG, "AVRCP_PLAY_DELAY_FAILED");
+    }
+    send_avrcp_passthrough(ESP_AVRC_PT_CMD_PLAY);
+    avrcp_schedule_delayed_snapshot("bridge_play_delayed");
 }
 
 static bool parse_chld(const char *value, esp_hf_chld_type_t *type, int *index)
@@ -1009,7 +1060,7 @@ static void handle_uart_command(char *line)
     } else if (strcmp(line, "STATUS") == 0) {
         log_status();
     } else if (strcmp(line, "AVRCP_PLAY") == 0) {
-        send_avrcp_passthrough(ESP_AVRC_PT_CMD_PLAY);
+        send_avrcp_play_command();
     } else if (strcmp(line, "AVRCP_PAUSE") == 0) {
         send_avrcp_passthrough(ESP_AVRC_PT_CMD_PAUSE);
     } else if (strcmp(line, "AVRCP_STOP") == 0) {
@@ -1518,6 +1569,7 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
             sco_pcm_gpio_config();
         } else if (sco_pcm_gpio_active) {
             a2dp_i2s_gpio_config();
+            hfp_mark_post_call_play_delay("audio_disconnected");
         }
         ESP_LOGI(TAG, "HFP_HF_AUDIO:state=%d bda=%s handle=%d frame=%u",
                  param->audio_stat.state,
@@ -1542,11 +1594,17 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
     case ESP_HF_CLIENT_CIND_CALL_EVT:
         ESP_LOGI(TAG, "HFP_HF_CIND_CALL:%d", param->call.status);
         ESP_LOGI(TAG, "BRIDGE_TX:HFP_HF_CIND_CALL:%d", param->call.status);
+        if (param->call.status == 0) {
+            hfp_mark_post_call_play_delay("call_idle");
+        }
         schedule_hf_clcc_query();
         break;
     case ESP_HF_CLIENT_CIND_CALL_SETUP_EVT:
         ESP_LOGI(TAG, "HFP_HF_CIND_CALLSETUP:%d", param->call_setup.status);
         ESP_LOGI(TAG, "BRIDGE_TX:HFP_HF_CIND_CALLSETUP:%d", param->call_setup.status);
+        if (param->call_setup.status == 0) {
+            hfp_mark_post_call_play_delay("setup_idle");
+        }
         schedule_hf_clcc_query();
         break;
     case ESP_HF_CLIENT_CIND_CALL_HELD_EVT:

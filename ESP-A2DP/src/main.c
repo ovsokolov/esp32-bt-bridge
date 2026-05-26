@@ -1995,7 +1995,6 @@ static void bt_app_avrc_tg_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param
         switch (param->psth_cmd.key_code) {
         case ESP_AVRC_PT_CMD_PLAY:
             ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PLAY");
-            bridge_request_snapshot("avrcp");
             start_media(AUDIO_I2S);
             break;
         case ESP_AVRC_PT_CMD_PAUSE:
@@ -3575,7 +3574,6 @@ static void handle_uart_command(char *line)
         print_board_id();
     } else if (strcmp(line, "PLAY") == 0) {
         ESP_LOGI(TAG, "BRIDGE_TX:AVRCP_PLAY");
-        bridge_request_snapshot("avrcp");
         start_media(AUDIO_I2S);
     } else if (strcmp(line, "I2S") == 0) {
         start_media(AUDIO_I2S);
