@@ -75,7 +75,7 @@ static const char *TAG = "ESP_A2DP";
 #define BT_DEVICE_NAME "ESP-A2DP-Source"
 #endif
 
-#define AG_BUILD_TAG "ag-hfp-outband-ring-repeat-20260526"
+#define AG_BUILD_TAG "ag-hfp-force-outband-ring-20260526"
 
 #ifndef BT_REMOTE_NAME
 #define BT_REMOTE_NAME ""
@@ -109,6 +109,10 @@ static const char *TAG = "ESP_A2DP";
 #define HFP_OUTBAND_RING_REPEAT_MS 2000
 #define BRIDGE_SNAPSHOT_MIN_INTERVAL_MS 1500
 #define A2DP_I2S_GATE_DURING_SCO 0
+#define BTA_AG_HANDLE_ALL_COMPAT 0xFFFF
+#define BTA_AG_IN_CALL_RES_COMPAT 11
+#define BTA_AG_AT_MAX_LEN_COMPAT 256
+#define BTA_AG_CLIP_TYPE_DEFAULT_COMPAT 129
 
 static uint32_t a2dp_sbc_sample_rate(uint8_t samp_freq)
 {
@@ -212,6 +216,23 @@ typedef struct {
     TickType_t started_tick;
     hfp_call_t snapshot[HFP_MAX_CALLS];
 } hfp_call_control_t;
+
+typedef struct {
+    uint16_t type;
+    uint16_t value;
+} bta_ag_ind_compat_t;
+
+typedef struct {
+    char str[BTA_AG_AT_MAX_LEN_COMPAT + 1];
+    bta_ag_ind_compat_t ind;
+    uint16_t num;
+    uint16_t audio_handle;
+    uint16_t errcode;
+    uint8_t ok_flag;
+    uint8_t state;
+} bta_ag_res_data_compat_t;
+
+extern void BTA_AgResult(uint16_t handle, uint8_t result, bta_ag_res_data_compat_t *data);
 
 typedef struct {
     esp_bd_addr_t bda;
@@ -2488,21 +2509,28 @@ static esp_err_t hfp_ag_send_outband_ring_state(const char *reason)
         return ESP_ERR_INVALID_STATE;
     }
 
+    char *number = hfp_report_number();
     hfp_ag_set_inband_ring(false);
     esp_err_t err = esp_hf_ag_answer_call(remote_bda,
                                           hfp_report_num_active(),
                                           hfp_report_num_held(),
                                           hfp_call_status(),
                                           hfp_call_setup_status(),
-                                          hfp_report_number(),
+                                          number,
                                           ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+    bta_ag_res_data_compat_t ring = {0};
+    if (number != NULL && number[0] != '\0') {
+        snprintf(ring.str, sizeof(ring.str), "\"%s\"", number);
+    }
+    ring.num = BTA_AG_CLIP_TYPE_DEFAULT_COMPAT;
+    BTA_AgResult(BTA_AG_HANDLE_ALL_COMPAT, BTA_AG_IN_CALL_RES_COMPAT, &ring);
     hfp_report_indicators();
     hfp_outband_ring_ticks++;
     ESP_LOGI(TAG,
-             "HFP_AG_OUTBAND_RING:%s tick=%" PRIu32 " err=0x%x active=%d held=%d setup=%d num=\"%s\"",
+             "HFP_AG_OUTBAND_RING:%s tick=%" PRIu32 " err=0x%x forced=1 active=%d held=%d setup=%d num=\"%s\"",
              reason ? reason : "tick", hfp_outband_ring_ticks, err,
              hfp_report_num_active(), hfp_report_num_held(),
-             hfp_call_setup_status(), hfp_report_number() ? hfp_report_number() : "");
+             hfp_call_setup_status(), number ? number : "");
     return err;
 }
 
