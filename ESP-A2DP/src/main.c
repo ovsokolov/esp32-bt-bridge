@@ -75,7 +75,7 @@ static const char *TAG = "ESP_A2DP";
 #define BT_DEVICE_NAME "ESP-A2DP-Source"
 #endif
 
-#define AG_BUILD_TAG "ag-hfp-force-outband-ring-20260526"
+#define AG_BUILD_TAG "ag-hfp-inband-ring-sco-20260526"
 
 #ifndef BT_REMOTE_NAME
 #define BT_REMOTE_NAME ""
@@ -2510,7 +2510,7 @@ static esp_err_t hfp_ag_send_outband_ring_state(const char *reason)
     }
 
     char *number = hfp_report_number();
-    hfp_ag_set_inband_ring(false);
+    hfp_ag_set_inband_ring(true);
     esp_err_t err = esp_hf_ag_answer_call(remote_bda,
                                           hfp_report_num_active(),
                                           hfp_report_num_held(),
@@ -2527,7 +2527,7 @@ static esp_err_t hfp_ag_send_outband_ring_state(const char *reason)
     hfp_report_indicators();
     hfp_outband_ring_ticks++;
     ESP_LOGI(TAG,
-             "HFP_AG_OUTBAND_RING:%s tick=%" PRIu32 " err=0x%x forced=1 active=%d held=%d setup=%d num=\"%s\"",
+             "HFP_AG_INBAND_RING:%s tick=%" PRIu32 " err=0x%x sco=1 active=%d held=%d setup=%d num=\"%s\"",
              reason ? reason : "tick", hfp_outband_ring_ticks, err,
              hfp_report_num_active(), hfp_report_num_held(),
              hfp_call_setup_status(), number ? number : "");
@@ -2833,6 +2833,7 @@ static void hfp_answer_call(void)
     }
     call->mode = CALL_ACTIVE;
     hfp_stop_outband_ring("ANSWER");
+    hfp_ag_set_inband_ring(false);
 
     ESP_LOGI(TAG, "HFP_AG_ANSWER_AUDIO_STATE:connected=%d sco_gpio=%d",
              hfp_ag_audio_connected, sco_pcm_gpio_active);
